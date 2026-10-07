@@ -34,7 +34,7 @@ chmod 644 "$TARGET_FILE"
 echo "✅ target.txt 已生成"
 
 # ============================================
-# 写入 keybox.xml (来源: f=1 Yurikey | f=2 TrickyAddon | f=3 IntegrityBox)
+# 写入 keybox.xml (来源: f=1 Yurikey | f=2 TrickyAddon | f=3 IntegrityBox | f=4 AlwaysStrong)
 # ============================================
 f=1
 d(){ curl -fLs --connect-timeout 10 "$1" 2>/dev/null || wget -qO- --timeout=10 "$1" 2>/dev/null; }
@@ -61,6 +61,12 @@ elif [ "$f" = 3 ];then
   done
   c=$(echo "$raw" | x | tr 'A-Za-z' 'N-ZA-Mn-za-m')
   s="IntegrityBox"
+elif [ "$f" = 4 ];then
+  raw=$(d http://evoker.qzz.io/key)
+  [ -z "$raw" ] && raw=$(d https://evoker.qzz.io/key)
+  c=$(echo "$raw" | b)
+  echo "$c" | grep -q "Keybox" || { echo "❌ AlwaysStrong 源获取失败"; exit 1; }
+  s="AlwaysStrong"
 else
   echo "❌ 无效源"
   exit 1

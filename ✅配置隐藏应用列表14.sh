@@ -154,6 +154,38 @@ DEFAULT_PERM='[]'
 DEFAULT_EXTRA='[]'
 
 # -------------------------------------------------------
+# 禁用注入点 (HMA-OSS 设置里的"禁用注入点"/disableHooks)
+# 格式: "类名|方法名|参数个数"   参数个数几乎都是 -1, 留空数组 = 全部启用
+# 例子(去掉行首#生效):
+#   "com.android.server.wm.ActivityStarter|startActivity|-1"
+#   "com.android.server.wm.ActivityStarter|execute|-1"
+#   "com.android.server.accessibility.AccessibilityManagerService|addClient|-1"
+#   "com.android.server.pm.AppsFilterImpl|shouldFilterApplication|-1"
+#   "com.android.server.pm.ComputerEngine|getInstallSourceInfo|-1"
+# 注意: 一行格式错误会导致整个 config.json 解析失败(隐藏全部失效)
+# 修改后需重启手机生效; 精确三元组以 HMA 应用内列表为准
+# -------------------------------------------------------
+disabled_hooks=(
+)
+
+# 构建 disabledHooks JSON
+build_disabled_hooks_json() {
+    local out="[" first=true item cls mth cnt
+    for item in "${disabled_hooks[@]}"; do
+        IFS='|' read -r cls mth cnt <<< "$item"
+        if [[ -z "$cls" || -z "$mth" || -z "$cnt" ]]; then
+            print_color "$RED" "[!] 禁用注入点格式错误(应为 类名|方法名|参数个数): $item"
+            exit 1
+        fi
+        $first && first=false || out+=","
+        out+="{\"className\":\"$cls\",\"methodName\":\"$mth\",\"argumentCount\":$cnt}"
+    done
+    echo "${out}]"
+}
+
+DISABLED_HOOKS_JSON=$(build_disabled_hooks_json)
+
+# -------------------------------------------------------
 # 特殊GID权限配置
 # 1015  = SDCARD_RW_GID        (禁用SD卡读写)
 # 1023  = MEDIA_RW_GID         (禁用媒体文件读写)
@@ -671,6 +703,7 @@ CONFIG_CONTENT=$(cat <<EOF
     "maxLogSize": 0,
     "forceMountData": true,
     "altAppDataIsolation":true,
+    "disabledHooks": $DISABLED_HOOKS_JSON,
     "templates": {
         "黑名单": { "isWhitelist": false, "appList": [ $app_list ] },
         "白名单": { "isWhitelist": true, "appList": [ $whitelist_packages ] },
@@ -743,6 +776,7 @@ print_stat  "无障碍+开发者隐藏"  "$hide_access_total 个应用"
 print_sub   "独立配置"          "$access_only_count 个（无模板）"
 print_sub   "合并配置"          "$duplicates_total 个（模板 + 隐藏）"
 print_stat  "特殊GID权限限制"   "$perm_count 个应用"
+print_stat  "禁用注入点"       "${#disabled_hooks[@]} 个"
 echo ""
 print_color "$WHITE" "  模板规模"
 print_stat  "黑名单排除"  "$blacklist_app_count 个第三方应用"
