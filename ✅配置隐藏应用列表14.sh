@@ -166,6 +166,8 @@ DEFAULT_EXTRA='[]'
 # 修改后需重启手机生效; 精确三元组以 HMA 应用内列表为准
 # -------------------------------------------------------
 disabled_hooks=(
+"com.android.server.pm.ComputerEngine|getPackageInfoInternal|-1"
+"com.android.server.pm.ComputerEngine|getApplicationInfoInternal|-1"
 )
 
 # 构建 disabledHooks JSON
@@ -703,12 +705,13 @@ CONFIG_CONTENT=$(cat <<EOF
     "maxLogSize": 0,
     "forceMountData": true,
     "altAppDataIsolation":true,
-    "disabledHooks": $DISABLED_HOOKS_JSON,
     "templates": {
         "黑名单": { "isWhitelist": false, "appList": [ $app_list ] },
         "白名单": { "isWhitelist": true, "appList": [ $whitelist_packages ] },
         "游戏": { "isWhitelist": true, "appList": [ $game_list ] }
     },
+    "settingsTemplates": {},
+    "disabledHooks": $DISABLED_HOOKS_JSON,
     "scope": { $scope }
 }
 EOF
