@@ -702,7 +702,7 @@ CONFIG_CONTENT=$(cat <<EOF
 {
     "configVersion": 90,
     "detailLog": false,
-    "maxLogSize": 0,
+    "maxLogSize": 512,
     "forceMountData": true,
     "altAppDataIsolation":true,
     "templates": {
