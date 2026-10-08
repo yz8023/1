@@ -700,7 +700,7 @@ blacklist_app_count=$(echo "$pkg_filtered" | wc -l)
 # 生成配置内容
 CONFIG_CONTENT=$(cat <<EOF
 {
-    "configVersion": 90,
+    "configVersion": 93,
     "detailLog": false,
     "maxLogSize": 512,
     "forceMountData": true,
