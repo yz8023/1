@@ -5,10 +5,10 @@ Feature: injector-full-fixes
 目标工程: `abcd源码/project/`（CodeAssist 工程，Java 8，minSdk 24 / targetSdk 34）
 
 - [ ] 1. 依赖与工程配置收敛（R8.1/R8.2、R7.2/R7.3/R7.4，设计 §9）
-  - [ ] 1.1 更新 `module.toml`：material 统一为 1.14.0（删除 1.12.0）；dependencies 增加 `org.smali:smali:2.5.2` 与 `com.android.tools.build:apksig:8.5.0`
-  - [ ] 1.2 清理 `deps/libraries.json`：移除 `org.apktool:apktool-lib:2.9.3`；核对全部 smali 相关 classes 缓存路径统一为 2.5.2；按现有条目结构新增 `com.android.tools.build:apksig:8.5.0` JAR 条目
-  - [ ] 1.3 下载 `apksig-8.5.0.jar` 放入 `project/.platform/caches/resolved-deps/com/android/tools/build/apksig/8.5.0/`（CodeAssist 设备端离线解析用），下载失败则记录并触发设计文档中的 v2 自实现备案
-  - [ ] 1.4 修改 `AndroidManifest.xml`：`allowBackup="false"`；删除 `READ_/WRITE_EXTERNAL_STORAGE`；删除 `largeHeap`
+  - [x] 1.1 更新 `module.toml`：material 统一为 1.14.0（删除 1.12.0）；dependencies 增加 `org.smali:smali:2.5.2` 与 `com.android.tools.build:apksig:8.5.0`
+  - [x] 1.2 清理 `deps/libraries.json`：移除 `org.apktool:apktool-lib:2.9.3`；核对全部 smali 相关 classes 缓存路径统一为 2.5.2；按现有条目结构新增 `com.android.tools.build:apksig:8.5.0` JAR 条目
+  - [x] 1.3 下载 `apksig-8.5.0.jar` 放入 `project/.platform/caches/resolved-deps/com/android/tools/build/apksig/8.5.0/`（CodeAssist 设备端离线解析用），下载失败则记录并触发设计文档中的 v2 自实现备案
+  - [x] 1.4 修改 `AndroidManifest.xml`：`allowBackup="false"`；删除 `READ_/WRITE_EXTERNAL_STORAGE`；删除 `largeHeap`
 - [ ] 2. core 基础组件（设计 §Components 1/3/5）
   - [ ] 2.1 新建 `core.ZipSafety`：`unzipSafe(InputStream, File)` 逐 entry 规范化路径校验，越界中止并报错（R7.1，问题 11）
   - [ ] 2.2 新建 `core.AxmlParser` + `core.ManifestInfo`：纯 Java 二进制 XML 解析（string pool/resource map/tag 事件流），按资源 ID 匹配属性，`activity-alias` 取 `targetActivity`，`MAIN`+`LAUNCHER` 同 filter 才计入，`.` 前缀类名拼 `package`（R3.1-R3.5，问题 4/5/6）
