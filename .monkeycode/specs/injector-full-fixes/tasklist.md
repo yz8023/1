@@ -10,9 +10,9 @@ Feature: injector-full-fixes
   - [x] 1.3 下载 `apksig-8.5.0.jar` 放入 `project/.platform/caches/resolved-deps/com/android/tools/build/apksig/8.5.0/`（CodeAssist 设备端离线解析用），下载失败则记录并触发设计文档中的 v2 自实现备案
   - [x] 1.4 修改 `AndroidManifest.xml`：`allowBackup="false"`；删除 `READ_/WRITE_EXTERNAL_STORAGE`；删除 `largeHeap`
 - [ ] 2. core 基础组件（设计 §Components 1/3/5）
-  - [ ] 2.1 新建 `core.ZipSafety`：`unzipSafe(InputStream, File)` 逐 entry 规范化路径校验，越界中止并报错（R7.1，问题 11）
-  - [ ] 2.2 新建 `core.AxmlParser` + `core.ManifestInfo`：纯 Java 二进制 XML 解析（string pool/resource map/tag 事件流），按资源 ID 匹配属性，`activity-alias` 取 `targetActivity`，`MAIN`+`LAUNCHER` 同 filter 才计入，`.` 前缀类名拼 `package`（R3.1-R3.5，问题 4/5/6）
-  - [ ] 2.3 新建 `core.AlignedZipWriter`：手工 LOCAL FILE HEADER + extra field padding + data descriptor；entry 压缩方式继承原 APK；`resources.arsc` 强制 STORED + 4 字节对齐；STORED `.so` 4096 对齐；跳过 `META-INF/*.SF|*.RSA|*.DSA|*.MF`（R2.1/R2.2/R2.3，问题 2/3/18）
+  - [x] 2.1 新建 `core.ZipSafety`：`unzipSafe(InputStream, File)` 逐 entry 规范化路径校验，越界中止并报错（R7.1，问题 11）
+  - [x] 2.2 新建 `core.AxmlParser` + `core.ManifestInfo`：纯 Java 二进制 XML 解析（string pool/resource map/tag 事件流），按资源 ID 匹配属性，`activity-alias` 取 `targetActivity`，`MAIN`+`LAUNCHER` 同 filter 才计入，`.` 前缀类名拼 `package`（R3.1-R3.5，问题 4/5/6）
+  - [x] 2.3 新建 `core.AlignedZipWriter`：手工 LOCAL FILE HEADER + extra field padding + data descriptor；entry 压缩方式继承原 APK；`resources.arsc` 强制 STORED + 4 字节对齐；STORED `.so` 4096 对齐；跳过 `META-INF/*.SF|*.RSA|*.DSA|*.MF`（R2.1/R2.2/R2.3，问题 2/3/18）
   - [ ] 2.4* 编写 AlignedZipWriter 正确性属性自检代码（属性 1：entry method 与原 APK 一致；属性 2：arsc STORED 且 offset%4==0），以日志形式输出
 - [ ] 3. 注入链路闭环（R1，问题 1/9/10/18）
   - [ ] 3.1 新建 `core.SmaliInjector`：baksmali 反编译（jobs 上限 4）；重写插桩逻辑（解析并 `.locals`+1、插入行包裹 try/catch Throwable、标签按方法内计数保证唯一、xymods 无 invoke 行即中止）（R1.3-R1.6，问题 9/10）
