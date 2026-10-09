@@ -136,12 +136,20 @@ graph TD
 
 ## Risks
 
-| 风险 | 缓解 |
-|------|------|
-| CodeAssist 无法解析 `com.android.tools.build:apksig`（Google Maven） | 备选方案：v1 签名用纯 Java JAR 签名实现，v2 用自写 APK Signing Block 写入器（格式公开，约 400 行） |
-| AndroidKeyStore 私钥与 apksig 兼容性问题 | 备选方案：引入 `org.bouncycastle:bcprov-jdk15on:1.70` 生成自签证书，密钥落盘 PKCS#12 |
-| smali 2.5.2 `Smali.assemble` 实际签名与预期不符 | 实现时先解包 libraries.json 中 smali jar 核对 API，必要时用 `assembleSmaliFile(File, DexBuilder, ...)` 逐文件汇编 |
-| 宿主 APK 使用 v3+/轮换签名或加密壳 | 超出本次范围，注入失败时输出明确日志 |
+| 风险 | 缓解 | 实施结果 |
+|------|------|----------|
+| CodeAssist 无法解析 `com.android.tools.build:apksig`（Google Maven） | 备选方案：v1 签名用纯 Java JAR 签名实现，v2 用自写 APK Signing Block 写入器（格式公开，约 400 行） | 已化解：apksig-8.5.0.jar 已离线放置到 `project/.platform/caches/resolved-deps/`，libraries.json 指向该缓存路径 |
+| AndroidKeyStore 私钥与 apksig 兼容性问题 | 备选方案：引入 `org.bouncycastle:bcprov-jdk15on:1.70` 生成自签证书，密钥落盘 PKCS#12 | 保留备案；apksig 通过 `java.security.Signature` 使用 KeyStore 私钥，理论上兼容，待设备验证 |
+| smali 2.5.2 `Smali.assemble` 实际签名与预期不符 | 实现时先解包 libraries.json 中 smali jar 核对 API，必要时用 `assembleSmaliFile(File, DexBuilder, ...)` 逐文件汇编 | 已化解：沙盒内用 Python 解析 jar 常量池核对，`Smali.assemble(SmaliOptions, String... dirs) → boolean`、SmaliOptions 公开字段 apiLevel/outputDexFile/jobs/verboseErrors 均存在，SmaliInjector 按此实现 |
+| 宿主 APK 使用 v3+/轮换签名或加密壳 | 超出本次范围，注入失败时输出明确日志 | 维持范围外；旧签名条目已在重打包时剔除，v1+v2 由 apksig 重出 |
+
+## 交付说明（实施回写）
+
+- 签名采用 apksig 高层 API `ApkSigner.Builder`（计划中的 `DefaultApkSignerEngine` 为其底层引擎，高层 API 内部封装同一流程，含 minSdk 24 与 v1/v2 开关）。
+- `ZipSafety` 对外方法名为 `unzip(InputStream, File)`（即计划中的 unzipSafe，语义一致：canonical path 越界即抛 IOException）。
+- 产物自检 `ApkRepackager.verifyProperties` 输出：P1 压缩方式一致性、P2 resources.arsc STORED+4 对齐（localDataOffset 解析 LFH 实际数据偏移）、旧签名剔除情况；`SmaliInjector.verifyPatchedDex` 输出 P4 回读自检。
+- AlignedZipWriter 曾在沙盒原型验证中发现 offset 未计数据字节的 bug，已修复（writeStored/writeDeflated 均累加数据长度）。
+- 沙盒无 JDK，API 核对方式：Python 解析 class 常量池（apksig-8.5.0.jar、smali-2.5.2.jar）+ Python 复刻 zip 字节布局对照 `zipfile`（对齐/CRC/压缩位标志全通过，见会话记录）。
 
 ## References
 

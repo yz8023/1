@@ -4,12 +4,12 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.content.res.XmlResourceParser;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
+import android.text.InputType;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.style.ForegroundColorSpan;
@@ -64,34 +64,51 @@ import java.util.Enumeration;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
-import java.util.zip.ZipInputStream;
-import java.util.zip.ZipOutputStream;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 import dalvik.system.DexClassLoader;
 
+import com.example.injector.core.ApkRepackager;
+import com.example.injector.core.ApkSignerService;
+import com.example.injector.core.AxmlParser;
+import com.example.injector.core.ManifestInfo;
+import com.example.injector.core.SmaliInjector;
+import com.example.injector.core.ZipSafety;
+
 public class MainActivity extends AppCompatActivity {
 
     private static final String DEFAULT_SECRET = "Aurora_Pro_#9981_Secret";
     private static final String PREF = "aurora_injector";
     private static final String KEY_SECRET = "secret_key";
-    private static final String NOTICE_URL = "https://example.com/aurora_notice.txt";
+    private static final String KEY_NOTICE_URL = "notice_url";
+    private static final String KEY_KS_FILE = "ks_file";
+    private static final String KEY_KS_PASS = "ks_pass";
+    private static final String KEY_KS_ALIAS = "ks_alias";
     private static final long WINDOW_MS = 10 * 60_000L;
+
+    private static final String OFFLINE_NOTICE =
+            "离线演示公告：\n"
+            + "1. 支持预览 assets 图片。\n"
+            + "2. 弹窗包 = classes.dex + xymods.txt + assets/。\n"
+            + "3. provider authorities 自动替换为宿主包名。";
 
     private SharedPreferences sp;
     private FrameLayout content;
     private FloatingActionButton fab;
     private BottomNavigationView bottomNav;
 
-    private Uri apkUri, zipUri;
-    private ActivityResultLauncher<Intent> apkPicker, zipPicker;
+    private Uri apkUri, zipUri, ksUri;
+    private ActivityResultLauncher<Intent> apkPicker, zipPicker, ksPicker;
 
     // 当前页面独立日志器
     private LogConsole logger;
+    private LogConsole settingsLogger;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -108,6 +125,7 @@ public class MainActivity extends AppCompatActivity {
         bottomNav.getMenu().add(0, 2, 1, "预览").setIcon(android.R.drawable.ic_menu_view);
         bottomNav.getMenu().add(0, 3, 2, "注册机").setIcon(android.R.drawable.ic_menu_edit);
         bottomNav.getMenu().add(0, 4, 3, "公告").setIcon(android.R.drawable.ic_menu_info_details);
+        bottomNav.getMenu().add(0, 5, 4, "设置").setIcon(android.R.drawable.ic_menu_preferences);
 
         bottomNav.setOnItemSelectedListener(item -> {
             animateBottomIcon();
@@ -116,6 +134,7 @@ public class MainActivity extends AppCompatActivity {
                 case 2: showPreviewPage(); return true;
                 case 3: showRegisterPage(); return true;
                 case 4: showNoticePage(); return true;
+                case 5: showSettingsPage(); return true;
             }
             return false;
         });
@@ -148,6 +167,13 @@ public class MainActivity extends AppCompatActivity {
                         zipUri = r.getData().getData();
                         if (logger != null) logger.ok("已选择弹窗包：" + shortUri(zipUri));
                         snack("已选择弹窗包");
+                    }
+                });
+        ksPicker = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(), r -> {
+                    if (r.getResultCode() == Activity.RESULT_OK && r.getData() != null) {
+                        ksUri = r.getData().getData();
+                        promptKeystoreImport();
                     }
                 });
 
@@ -283,8 +309,8 @@ public class MainActivity extends AppCompatActivity {
                               LinearProgressIndicator progress, TextView stage) {
         new Thread(() -> {
             long t0 = System.currentTimeMillis();
+            File work = new File(getFilesDir(), "inject_work");
             try {
-                File work = new File(getFilesDir(), "inject_work");
                 delete(work);
                 work.mkdirs();
 
@@ -346,19 +372,30 @@ public class MainActivity extends AppCompatActivity {
                 String dexEntryName = targetDex.getName();
                 logger.ok("目标 dex：" + dexEntryName);
 
-                updateUi(progress, stage, 70, "反编译并插入 smali 调用");
-                File patchedDex = injectCallIntoDex(targetDex, selectedActivity, smaliCall, work);
-                logger.ok("smali 插入完成");
+                updateUi(progress, stage, 60, "反编译、插桩并汇编");
+                logger.info("baksmali 反编译 → 插桩 → smali 汇编…");
+                File patchedDex = SmaliInjector.inject(targetDex, selectedActivity, smaliCall, work, 4);
+                logger.ok("smali 汇编完成，生成 patched.dex");
+                for (String line : SmaliInjector.verifyPatchedDex(patchedDex, selectedActivity, smaliCall)) {
+                    logger.info(line);
+                }
 
-                updateUi(progress, stage, 88, "重建 APK");
+                updateUi(progress, stage, 80, "重打包 APK");
                 int maxDex = findMaxDexIndex(apkCopy);
                 String newPopupDexName = "classes" + (maxDex + 1) + ".dex";
                 logger.info("新弹窗 dex 名称：" + newPopupDexName);
+                File unsignedApk = new File(work, "injected-unsigned.apk");
+                List<String> repackLog = new ArrayList<>();
+                ApkRepackager.repack(apkCopy, patchedDex, dexEntryName,
+                        popupDex, newPopupDexName, popupAssets, unsignedApk, repackLog);
+                for (String line : repackLog) logger.info(line);
 
-                File outApk = new File(work, "injected.apk");
-                rebuildApk(apkCopy, patchedDex, dexEntryName,
-                        popupDex, newPopupDexName,
-                        popupAssets, outApk);
+                updateUi(progress, stage, 92, "重签名 APK");
+                File outApk = new File(getFilesDir(), "injected.apk");
+                if (outApk.exists()) outApk.delete();
+                ApkSignerService.signApk(unsignedApk, outApk, getApplicationContext(),
+                        sp.getString(KEY_KS_PASS, ""), sp.getString(KEY_KS_ALIAS, ""),
+                        line -> logger.info(line));
 
                 long cost = System.currentTimeMillis() - t0;
                 updateUi(progress, stage, 100, "完成：" + outApk.getAbsolutePath());
@@ -373,96 +410,28 @@ public class MainActivity extends AppCompatActivity {
                     stage.setText("失败：" + msg);
                     snack("失败：" + msg);
                 });
+            } finally {
+                delete(work);
+                logger.info("工作目录已清理");
             }
         }).start();
     }
 
     private List<String> parseManifest(File apk) throws Exception {
-        List<String> result = new ArrayList<>();
-
-        File tmp = new File(getCacheDir(), "AndroidManifest.xml");
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
         try (ZipFile zf = new ZipFile(apk)) {
             ZipEntry e = zf.getEntry("AndroidManifest.xml");
-            if (e == null) return result;
-            try (InputStream in = zf.getInputStream(e);
-                 FileOutputStream out = new FileOutputStream(tmp)) {
-                byte[] buf = new byte[8192]; int n;
-                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            if (e == null) throw new IllegalStateException("APK 缺少 AndroidManifest.xml");
+            try (InputStream in = zf.getInputStream(e)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
             }
         }
 
-        byte[] axml;
-        try (InputStream in = new FileInputStream(tmp)) {
-            axml = readAllBytes(in);
-        }
-
-        XmlResourceParser parser;
-        try {
-            Class<?> xmlBlockClass = Class.forName("android.content.res.XmlBlock");
-            java.lang.reflect.Constructor<?> ctor = xmlBlockClass.getConstructor(byte[].class);
-            Object xmlBlock = ctor.newInstance((Object) axml);
-            java.lang.reflect.Method newParser = xmlBlockClass.getMethod("newParser");
-            parser = (XmlResourceParser) newParser.invoke(xmlBlock);
-        } catch (Throwable t) {
-            throw new IllegalStateException("解析 AndroidManifest 失败：" + t);
-        }
-
-        String pkg = null;
-        String current = null;
-        boolean sawMain = false;
-
-        int event;
-        while ((event = parser.next()) != XmlResourceParser.END_DOCUMENT) {
-            if (event == XmlResourceParser.START_TAG) {
-                String name = parser.getName();
-                if ("manifest".equals(name)) {
-                    for (int i = 0; i < parser.getAttributeCount(); i++) {
-                        if ("package".equals(parser.getAttributeName(i))) {
-                            pkg = parser.getAttributeValue(i);
-                            break;
-                        }
-                    }
-                } else if ("activity".equals(name) || "activity-alias".equals(name)) {
-                    current = attrAndroidName(parser);
-                    sawMain = false;
-                } else if ("action".equals(name)) {
-                    String act = attrAndroidName(parser);
-                    if ("android.intent.action.MAIN".equals(act)) sawMain = true;
-                } else if ("category".equals(name)) {
-                    String cat = attrAndroidName(parser);
-                    if ("android.intent.category.LAUNCHER".equals(cat)
-                            && sawMain && current != null) {
-                        String full = current.startsWith(".")
-                                ? (pkg == null ? "" : pkg) + current
-                                : current;
-                        if (!result.contains(full)) result.add(full);
-                    }
-                }
-            } else if (event == XmlResourceParser.END_TAG) {
-                String name = parser.getName();
-                if ("activity".equals(name) || "activity-alias".equals(name)) {
-                    current = null;
-                    sawMain = false;
-                }
-            }
-        }
-        parser.close();
-        return result;
-    }
-
-    private String attrAndroidName(XmlResourceParser parser) {
-        for (int i = 0; i < parser.getAttributeCount(); i++) {
-            String ns = parser.getAttributeNamespace(i);
-            String name = parser.getAttributeName(i);
-            if ("http://schemas.android.com/apk/res/android".equals(ns)
-                    && "name".equals(name)) {
-                return parser.getAttributeValue(i);
-            }
-            if ("name".equals(name) && (ns == null || ns.isEmpty())) {
-                return parser.getAttributeValue(i);
-            }
-        }
-        return null;
+        ManifestInfo info = new AxmlParser(bos.toByteArray()).parse();
+        logger.info("宿主包名：" + info.packageName);
+        return info.launcherTargets;
     }
 
     private File findDexContainingClass(File apk, String className, File workDir) throws Exception {
@@ -495,61 +464,6 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    private File injectCallIntoDex(File originalDex, String className,
-                                   String smaliCall, File workDir) throws Exception {
-        File smaliDir = new File(workDir, "smali_tmp");
-        delete(smaliDir);
-
-        org.jf.dexlib2.dexbacked.DexBackedDexFile dexFile =
-                org.jf.dexlib2.dexbacked.DexBackedDexFile.fromInputStream(
-                        org.jf.dexlib2.Opcodes.getDefault(),
-                        new FileInputStream(originalDex));
-
-        org.jf.baksmali.Baksmali.disassembleDexFile(
-                dexFile, smaliDir,
-                Runtime.getRuntime().availableProcessors(),
-                new org.jf.baksmali.BaksmaliOptions());
-
-        String smaliPath = className.replace('.', '/') + ".smali";
-        File targetSmali = new File(smaliDir, smaliPath);
-        if (!targetSmali.exists()) {
-            throw new IllegalStateException("反编译后找不到 smali：" + smaliPath);
-        }
-
-        insertInvokeInOnCreate(targetSmali, smaliCall);
-
-        File newDex = new File(workDir, "patched.dex");
-        copyFile(originalDex, newDex);
-        return newDex;
-    }
-
-    private void insertInvokeInOnCreate(File smaliFile, String smaliCall) throws Exception {
-        List<String> lines = java.nio.file.Files.readAllLines(smaliFile.toPath());
-        List<String> out = new ArrayList<>();
-        boolean inOnCreate = false;
-        boolean inserted = false;
-
-        for (String line : lines) {
-            out.add(line);
-            String t = line.trim();
-
-            if (!inOnCreate && t.startsWith(".method")
-                    && t.contains("onCreate(Landroid/os/Bundle;)V")) {
-                inOnCreate = true;
-                continue;
-            }
-            if (inOnCreate && !inserted && t.startsWith("invoke-super")) {
-                out.add("");
-                out.add("    " + smaliCall);
-                inserted = true;
-                inOnCreate = false;
-            }
-        }
-
-        if (!inserted) throw new IllegalStateException("smali 里没找到 invoke-super，无法插入");
-        java.nio.file.Files.write(smaliFile.toPath(), out);
-    }
-
     private int findMaxDexIndex(File apk) throws Exception {
         int max = 0;
         try (ZipFile zf = new ZipFile(apk)) {
@@ -566,90 +480,44 @@ public class MainActivity extends AppCompatActivity {
         return max;
     }
 
-    private void rebuildApk(File apkIn, File patchedDex, String dexEntryName,
-                            File popupDex, String newDexName,
-                            File popupAssets, File apkOut) throws Exception {
-        try (ZipInputStream zis = new ZipInputStream(new FileInputStream(apkIn));
-             ZipOutputStream zos = new ZipOutputStream(new FileOutputStream(apkOut))) {
-
-            byte[] buf = new byte[8192];
-            ZipEntry entry;
-            boolean replaced = false;
-
-            while ((entry = zis.getNextEntry()) != null) {
-                if (entry.getName().equals(dexEntryName)) {
-                    zos.putNextEntry(new ZipEntry(dexEntryName));
-                    try (FileInputStream fis = new FileInputStream(patchedDex)) {
-                        int n;
-                        while ((n = fis.read(buf)) > 0) zos.write(buf, 0, n);
-                    }
-                    zos.closeEntry();
-                    replaced = true;
-                    continue;
-                }
-                if (entry.getName().equals(newDexName)) continue;
-
-                zos.putNextEntry(new ZipEntry(entry.getName()));
-                int n;
-                while ((n = zis.read(buf)) > 0) zos.write(buf, 0, n);
-                zos.closeEntry();
-            }
-
-            if (!replaced) throw new IllegalStateException("APK 里没找到要替换的 dex");
-
-            if (popupDex != null && popupDex.exists()) {
-                zos.putNextEntry(new ZipEntry(newDexName));
-                try (FileInputStream fis = new FileInputStream(popupDex)) {
-                    int n;
-                    while ((n = fis.read(buf)) > 0) zos.write(buf, 0, n);
-                }
-                zos.closeEntry();
-            }
-
-            if (popupAssets != null && popupAssets.exists()) {
-                appendDirToZip(zos, popupAssets, "assets/");
-            }
-        }
-    }
-
-    private void appendDirToZip(ZipOutputStream zos, File dir, String prefix) throws Exception {
-        File[] files = dir.listFiles();
-        if (files == null) return;
-        byte[] buf = new byte[8192];
-        for (File f : files) {
-            if (f.isDirectory()) {
-                appendDirToZip(zos, f, prefix + f.getName() + "/");
-            } else {
-                zos.putNextEntry(new ZipEntry(prefix + f.getName()));
-                try (FileInputStream fis = new FileInputStream(f)) {
-                    int n;
-                    while ((n = fis.read(buf)) > 0) zos.write(buf, 0, n);
-                }
-                zos.closeEntry();
-            }
-        }
-    }
-
     private String askUserWhichActivity(List<String> activities) {
-        final String[] result = {null};
+        final AtomicReference<String> result = new AtomicReference<>(null);
+        final AtomicReference<AlertDialog> dialogRef = new AtomicReference<>(null);
         final CountDownLatch latch = new CountDownLatch(1);
 
-        runOnUiThread(() -> new AlertDialog.Builder(MainActivity.this)
-                .setTitle("选择要注入的启动类")
-                .setItems(activities.toArray(new String[0]),
-                        (d, which) -> {
-                            result[0] = activities.get(which);
-                            latch.countDown();
-                        })
-                .setOnCancelListener(d -> latch.countDown())
-                .show());
+        runOnUiThread(() -> {
+            AlertDialog dlg = new AlertDialog.Builder(MainActivity.this)
+                    .setTitle("选择要注入的启动类")
+                    .setItems(activities.toArray(new String[0]),
+                            (d, which) -> {
+                                result.set(activities.get(which));
+                                latch.countDown();
+                            })
+                    .setOnCancelListener(d -> latch.countDown())
+                    .show();
+            dialogRef.set(dlg);
+        });
 
         try {
-            latch.await();
+            boolean done = latch.await(30, TimeUnit.SECONDS);
+            if (!done) {
+                runOnUiThread(() -> {
+                    AlertDialog d = dialogRef.get();
+                    if (d != null && d.isShowing()) d.dismiss();
+                });
+                logger.warn("选择超时（30 秒），自动使用第一个启动类：" + activities.get(0));
+                return activities.get(0);
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            return activities.get(0);
         }
-        return result[0];
+        String chosen = result.get();
+        if (chosen == null) {
+            logger.warn("用户取消选择，自动使用第一个启动类：" + activities.get(0));
+            return activities.get(0);
+        }
+        return chosen;
     }
 
     // =========================================================
@@ -676,7 +544,7 @@ public class MainActivity extends AppCompatActivity {
         card.addView(inner);
 
         TextInputLayout tilClass = new TextInputLayout(this);
-        tilClass.setHint("入口类，如 com.aurora.Popup");
+        tilClass.setHint("入口类，如 com.example.popup.Popup");
         TextInputEditText etClass = new TextInputEditText(this);
         tilClass.addView(etClass);
         inner.addView(tilClass);
@@ -684,7 +552,6 @@ public class MainActivity extends AppCompatActivity {
         TextInputLayout tilMethod = new TextInputLayout(this);
         tilMethod.setHint("入口方法，如 show");
         TextInputEditText etMethod = new TextInputEditText(this);
-        tilMethod.addView(tilMethod == null ? etMethod : etMethod); // 保持结构
         tilMethod.addView(etMethod);
         inner.addView(tilMethod);
 
@@ -775,12 +642,26 @@ public class MainActivity extends AppCompatActivity {
 
                 java.lang.reflect.Method m = clazz.getMethod(mtd, Context.class);
                 log.info("调用入口：" + mtd + "(Context)");
-                m.invoke(null, this);
 
+                final CountDownLatch callLatch = new CountDownLatch(1);
+                final AtomicReference<Exception> callError = new AtomicReference<>(null);
                 runOnUiThread(() -> {
-                    log.ok("弹窗已弹出");
-                    snack("弹窗已弹出");
+                    try {
+                        m.invoke(null, MainActivity.this);
+                        log.ok("弹窗已弹出");
+                        snack("弹窗已弹出");
+                    } catch (Exception e) {
+                        callError.set(e);
+                    } finally {
+                        callLatch.countDown();
+                    }
                 });
+                boolean finished = callLatch.await(30, TimeUnit.SECONDS);
+                if (!finished) {
+                    throw new IllegalStateException("入口调用超时（30 秒），预览中止");
+                }
+                Exception err = callError.get();
+                if (err != null) throw err;
 
             } catch (Exception e) {
                 String msg = e.getMessage() == null ? e.toString() : e.getMessage();
@@ -890,7 +771,14 @@ public class MainActivity extends AppCompatActivity {
             String secret = resolveSecret(etSecret);
             sp.edit().putString(KEY_SECRET,
                     etSecret.getText() == null ? "" : etSecret.getText().toString()).apply();
-            String code = generateCode(secret);
+            String code;
+            try {
+                code = generateCode(secret);
+            } catch (Exception ex) {
+                regLogger.error("生成失败：" + ex.getMessage());
+                snack("生成失败：" + ex.getMessage());
+                return;
+            }
             tvOut.setTextColor(colorAttr(com.google.android.material.R.attr.colorPrimary));
             tvOut.setText(code);
             tvOut.setAlpha(0f);
@@ -906,7 +794,14 @@ public class MainActivity extends AppCompatActivity {
             pressAnim(v);
             String secret = resolveSecret(etSecret);
             String input = etCode.getText() == null ? "" : etCode.getText().toString();
-            boolean ok = verifyCode(secret, input);
+            boolean ok;
+            try {
+                ok = verifyCode(secret, input);
+            } catch (Exception ex) {
+                regLogger.error("校验异常：" + ex.getMessage());
+                snack("校验异常：" + ex.getMessage());
+                return;
+            }
             tvOut.setText(ok ? "✅ 激活成功" : "❌ 激活码无效");
             tvOut.setTextColor(ok ? 0xFF2E7D32 : 0xFFC62828);
             tvOut.setAlpha(0f);
@@ -981,11 +876,17 @@ public class MainActivity extends AppCompatActivity {
 
     private void loadNotice(TextView tv, LogConsole log) {
         new Thread(() -> {
-            log.info("拉取公告：" + NOTICE_URL);
+            String url = sp.getString(KEY_NOTICE_URL, "").trim();
+            if (url.isEmpty()) {
+                log.warn("未配置公告 URL，显示离线公告（可在设置页配置）");
+                runOnUiThread(() -> tv.setText(OFFLINE_NOTICE));
+                return;
+            }
+            log.info("拉取公告：" + url);
             String text;
             boolean online = true;
             try {
-                HttpURLConnection c = (HttpURLConnection) new URL(NOTICE_URL).openConnection();
+                HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
                 c.setConnectTimeout(6000);
                 c.setReadTimeout(6000);
                 try (BufferedReader r = new BufferedReader(
@@ -997,10 +898,7 @@ public class MainActivity extends AppCompatActivity {
                 }
             } catch (Exception e) {
                 online = false;
-                text = "离线演示公告：\n"
-                        + "1. 支持预览 assets 图片。\n"
-                        + "2. 弹窗包 = classes.dex + xymods.txt + assets/。\n"
-                        + "3. provider authorities 自动替换为宿主包名。";
+                text = OFFLINE_NOTICE;
             }
             final String out = text;
             final boolean ok = online;
@@ -1014,6 +912,189 @@ public class MainActivity extends AppCompatActivity {
                         .setDuration(280).start();
             });
         }).start();
+    }
+
+    // =========================================================
+    //                          设置页
+    // =========================================================
+    private void showSettingsPage() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(colorAttr(com.google.android.material.R.attr.colorSurface));
+        scroll.setFillViewport(true);
+
+        LinearLayout root = column();
+        scroll.addView(root, lpMatchWrap());
+        content.removeAllViews();
+        content.addView(scroll, lpMatchMatch());
+
+        LinearLayout header = columnNoPad();
+        header.addView(h1("设置"));
+        header.addView(sub("公告 URL · 激活密钥 · 签名密钥"));
+        root.addView(header);
+
+        MaterialCardView cardNotice = mdCardOutlined();
+        LinearLayout innerNotice = columnNoPad();
+        innerNotice.setPadding(dp(20), dp(16), dp(20), dp(16));
+        cardNotice.addView(innerNotice);
+
+        innerNotice.addView(labelInline("公告 URL"));
+        TextInputLayout tilUrl = new TextInputLayout(this);
+        tilUrl.setHint("https://…（留空显示离线公告）");
+        TextInputEditText etUrl = new TextInputEditText(this);
+        etUrl.setText(sp.getString(KEY_NOTICE_URL, ""));
+        tilUrl.addView(etUrl);
+        innerNotice.addView(tilUrl);
+
+        MaterialButton btnSaveNotice = mdButtonTonal("保存公告 URL");
+        innerNotice.addView(btnSaveNotice);
+        root.addView(cardNotice);
+
+        MaterialCardView cardSecret = mdCardOutlined();
+        LinearLayout innerSecret = columnNoPad();
+        innerSecret.setPadding(dp(20), dp(16), dp(20), dp(16));
+        cardSecret.addView(innerSecret);
+
+        innerSecret.addView(labelInline("激活密钥"));
+        TextInputLayout tilSecret = new TextInputLayout(this);
+        tilSecret.setHint("留空使用内置默认密钥");
+        TextInputEditText etSecret = new TextInputEditText(this);
+        etSecret.setText(sp.getString(KEY_SECRET, ""));
+        tilSecret.addView(etSecret);
+        innerSecret.addView(tilSecret);
+
+        MaterialButton btnSaveSecret = mdButtonTonal("保存激活密钥");
+        innerSecret.addView(btnSaveSecret);
+        root.addView(cardSecret);
+
+        MaterialCardView cardKs = mdCardOutlined();
+        LinearLayout innerKs = columnNoPad();
+        innerKs.setPadding(dp(20), dp(16), dp(20), dp(16));
+        cardKs.addView(innerKs);
+
+        innerKs.addView(labelInline("签名密钥"));
+        TextView tvKsState = new TextView(this);
+        tvKsState.setTextSize(13);
+        tvKsState.setPadding(0, dp(4), 0, dp(8));
+        tvKsState.setTextColor(colorAttr(com.google.android.material.R.attr.colorOnSurfaceVariant));
+        tvKsState.setText(keystoreStateText());
+        innerKs.addView(tvKsState);
+
+        TextInputLayout tilPass = new TextInputLayout(this);
+        tilPass.setHint("keystore 密码（可留空）");
+        TextInputEditText etPass = new TextInputEditText(this);
+        etPass.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        tilPass.addView(etPass);
+        innerKs.addView(tilPass);
+
+        TextInputLayout tilAlias = new TextInputLayout(this);
+        tilAlias.setHint("别名（可留空，默认取第一个）");
+        TextInputEditText etAlias = new TextInputEditText(this);
+        etAlias.setText(sp.getString(KEY_KS_ALIAS, ""));
+        tilAlias.addView(etAlias);
+        innerKs.addView(tilAlias);
+
+        MaterialButton btnImport = mdButtonFilled("导入 keystore 文件");
+        innerKs.addView(btnImport);
+
+        MaterialButton btnReset = mdButtonTonal("恢复自动生成密钥");
+        LinearLayout.LayoutParams rlp = lpMatchWrap();
+        rlp.topMargin = dp(8);
+        innerKs.addView(btnReset, rlp);
+        root.addView(cardKs);
+
+        LogConsole setLogger = new LogConsole(this);
+        LinearLayout.LayoutParams slp = lpMatchWrap();
+        slp.topMargin = dp(12);
+        root.addView(setLogger.view(), slp);
+        settingsLogger = setLogger;
+        setLogger.info("设置就绪");
+
+        btnSaveNotice.setOnClickListener(v -> {
+            pressAnim(v);
+            String url = etUrl.getText() == null ? "" : etUrl.getText().toString().trim();
+            sp.edit().putString(KEY_NOTICE_URL, url).apply();
+            setLogger.ok(url.isEmpty() ? "公告 URL 已清空（将显示离线公告）" : "公告 URL 已保存：" + url);
+            snack("已保存");
+        });
+
+        btnSaveSecret.setOnClickListener(v -> {
+            pressAnim(v);
+            String s = etSecret.getText() == null ? "" : etSecret.getText().toString().trim();
+            sp.edit().putString(KEY_SECRET, s).apply();
+            setLogger.ok(s.isEmpty() ? "激活密钥已清空（使用默认密钥）" : "激活密钥已保存");
+            snack("已保存");
+        });
+
+        btnImport.setOnClickListener(v -> {
+            pressAnim(v);
+            String pass = etPass.getText() == null ? "" : etPass.getText().toString();
+            String alias = etAlias.getText() == null ? "" : etAlias.getText().toString().trim();
+            sp.edit().putString(KEY_KS_PASS, pass).putString(KEY_KS_ALIAS, alias).apply();
+            Intent it = new Intent(Intent.ACTION_GET_CONTENT);
+            it.addCategory(Intent.CATEGORY_OPENABLE);
+            it.setType("*/*");
+            try {
+                ksPicker.launch(Intent.createChooser(it, "选择 keystore 文件"));
+            } catch (Exception e) {
+                setLogger.error("无法打开文件选择器：" + e.getMessage());
+            }
+        });
+
+        btnReset.setOnClickListener(v -> {
+            pressAnim(v);
+            sp.edit().remove(KEY_KS_FILE).remove(KEY_KS_PASS).remove(KEY_KS_ALIAS).apply();
+            ksUri = null;
+            tvKsState.setText(keystoreStateText());
+            setLogger.ok("已恢复自动生成密钥（AndroidKeyStore）");
+            snack("已恢复");
+        });
+
+        animateInStagger(root);
+    }
+
+    private String keystoreStateText() {
+        String ksFile = sp.getString(KEY_KS_FILE, "");
+        String ksAlias = sp.getString(KEY_KS_ALIAS, "");
+        if (ksFile.isEmpty()) {
+            return "当前：自动生成密钥（AndroidKeyStore，首次签名时创建）";
+        }
+        return "当前：已导入密钥文件（"
+                + ksFile + (ksAlias.isEmpty() ? "" : " · 别名 " + ksAlias) + "）";
+    }
+
+    private void promptKeystoreImport() {
+        LogConsole log = settingsLogger;
+        try {
+            File tmp = new File(getCacheDir(), "import_ks.tmp");
+            try (InputStream in = getContentResolver().openInputStream(ksUri);
+                 FileOutputStream out = new FileOutputStream(tmp)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            }
+
+            String pass = sp.getString(KEY_KS_PASS, "");
+            String alias = sp.getString(KEY_KS_ALIAS, "");
+            File importDir = getFilesDir();
+            String usedAlias = ApkSignerService.importKeystore(tmp, pass, alias, importDir,
+                    line -> {
+                        if (logger != null) logger.info(line);
+                        if (log != null) log.info(line);
+                    });
+
+            sp.edit()
+                    .putString(KEY_KS_FILE, ApkSignerService.IMPORTED_KS_NAME)
+                    .putString(KEY_KS_ALIAS, usedAlias)
+                    .apply();
+            tmp.delete();
+            if (log != null) log.ok("导入完成，签名将使用已导入密钥（别名 " + usedAlias + "）");
+            snack("keystore 导入成功");
+        } catch (Exception e) {
+            String msg = e.getMessage() == null ? e.toString() : e.getMessage();
+            if (log != null) log.error("导入失败：" + msg);
+            snack("导入失败：" + msg);
+        }
+        ksUri = null;
     }
 
     // =========================================================
@@ -1061,7 +1142,7 @@ public class MainActivity extends AppCompatActivity {
             for (byte b : raw) sb.append(String.format("%02x", b));
             return sb.toString();
         } catch (Exception e) {
-            return "0000000000000000";
+            throw new IllegalStateException("HMAC 计算失败：" + e.getMessage(), e);
         }
     }
 
@@ -1081,18 +1162,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void unzip(Uri uri, File dir) throws Exception {
-        try (ZipInputStream zis = new ZipInputStream(
-                getContentResolver().openInputStream(uri))) {
-            ZipEntry e; byte[] buf = new byte[8192];
-            while ((e = zis.getNextEntry()) != null) {
-                File f = new File(dir, e.getName());
-                if (e.isDirectory()) { f.mkdirs(); continue; }
-                File p = f.getParentFile();
-                if (p != null) p.mkdirs();
-                try (FileOutputStream os = new FileOutputStream(f)) {
-                    int n; while ((n = zis.read(buf)) > 0) os.write(buf, 0, n);
-                }
-            }
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            ZipSafety.unzip(in, dir);
         }
     }
 
@@ -1102,13 +1173,6 @@ public class MainActivity extends AppCompatActivity {
             int r = in.read(b);
             return new String(b, 0, Math.max(r, 0), StandardCharsets.UTF_8);
         }
-    }
-
-    private byte[] readAllBytes(InputStream in) throws Exception {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        byte[] buf = new byte[8192]; int n;
-        while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
-        return bos.toByteArray();
     }
 
     private void copyFile(File src, File dst) throws Exception {
